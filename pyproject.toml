@@ -1,0 +1,10 @@
+[project]
+name = "immich-panorama"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "dateparser>=1.4.0",
+    "immichpy>=4.1.3",
+]
