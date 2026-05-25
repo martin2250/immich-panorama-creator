@@ -29,17 +29,19 @@ async def create_pano_albums(
         metadata = MetadataSearchDto()
 
         if time_after:
-            metadata.created_after = dateparser.parse(time_after)
-            assert metadata.created_after is not None, "Could not parse time_after"
+            metadata.taken_after = dateparser.parse(time_after)
+            assert metadata.taken_after is not None, "Could not parse time_after"
         if time_before:
-            metadata.created_before = dateparser.parse(time_before)
-            assert metadata.created_before is not None, "Could not parse time_before"
+            metadata.taken_before = dateparser.parse(time_before)
+            assert metadata.taken_before is not None, "Could not parse time_before"
         if album:
             assert False, "Filtering by album is not implemented yet"
 
         search_result = await client.search.search_assets(metadata_search_dto=metadata)
 
         assets = search_result.assets.items
+
+        assert len(assets) > 0, "No assets found with the given filters"
 
         # sort assets by time
         assets.sort(key=lambda a: a.file_created_at)
@@ -73,7 +75,8 @@ async def create_pano_albums(
 
         for p in panos:
             pano_created_at: str = p[0].file_created_at.isoformat()
-            pano_created_at, _, _ = pano_created_at.split(".")  # remove milliseconds
+            pano_created_at, *_ = pano_created_at.split(".")  # remove milliseconds
+            pano_created_at, *_ = pano_created_at.split("+")  # remove timezone
             album_name = f"pano-{pano_created_at}"
             print(
                 "creating album",
@@ -342,6 +345,26 @@ async def add_metadata(
         await folder_queue.put(None)
 
     await asyncio.gather(*workers)
+
+
+# async def upload_panoramas(
+#     api_key: str,
+#     base_url: str,
+#     path: pathlib.Path,
+#     dry_run: bool,
+# ):
+#     from immichpy import AsyncClient
+
+#     async with AsyncClient(
+#         api_key=api_key,
+#         base_url=base_url,
+#     ) as client:
+#         for folder in path.glob("pano-*"):
+#             if not folder.is_dir():
+#                 continue
+#             jpg = folder / f"{folder.name}.jpg"
+
+#             client.assets.upload_asset()
 
 
 if __name__ == "__main__":
