@@ -314,9 +314,9 @@ async def add_metadata(
                         break
                 else:
                     print("could not find original file in pto", pto)
-                    return
+                    continue
 
-            tif = folder / "panorama.tif"
+            tif = next(folder.glob("*.tif"))
             jpg = folder / f"{folder.name}.jpg"
 
             await run_command(
@@ -328,10 +328,11 @@ async def add_metadata(
             )
             await run_command(
                 "exiftool",
-                "-overwrite_original",
                 "-TagsFromFile",
                 original_file,
                 "-all:all",
+                "-overwrite_original",
+                "--",
                 jpg,
             )
 
