@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "click>=8.4.1",
     "dateparser>=1.4.0",
     "immichpy>=4.1.3",
 ]

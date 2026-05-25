@@ -1,17 +1,90 @@
 import asyncio
-import argparse
+import functools
 import pathlib
-import os
 from datetime import timedelta
 
+import click
 
+###################################################################################################
+# click setup
+
+DRY_RUN_OPTION = click.option(
+    "--dry-run",
+    is_flag=True,
+    help="don't actually execute, just print what would be done",
+)
+API_KEY_OPTION = click.option(
+    "--api-key",
+    envvar="IMMICH_API_KEY",
+    required=True,
+)
+BASE_URL_OPTION = click.option(
+    "--base-url",
+    envvar="IMMICH_BASE_URL",
+    required=True,
+)
+THREADS_OPTION = click.option(
+    "--threads",
+    type=int,
+    default=4,
+    show_default=True,
+    help="number of threads to use for processing",
+)
+PATH_OPTION = click.option(
+    "--path",
+    type=click.Path(path_type=pathlib.Path),
+    default=pathlib.Path.cwd(),
+    show_default=True,
+    help="path where panorama folders are located",
+)
+
+
+@click.group()
+def cli():
+    pass
+
+
+def async_command(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        return asyncio.run(func(*args, **kwargs))
+
+    return wrapper
+
+
+###################################################################################################
+# helper functions
+
+
+async def run_command(*args):
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    returncode = await proc.wait()
+    if returncode != 0:
+        raise RuntimeError(f"Command {args} failed with return code {returncode}")
+
+
+###################################################################################################
+
+
+@cli.command(help="group photos into albums if they belong to the same pano")
+@API_KEY_OPTION
+@BASE_URL_OPTION
+@DRY_RUN_OPTION
+@click.option("--time-after", help="only consider photos created after this time")
+@click.option("--time-before", help="only consider photos created before this time")
+@click.option("--album", help="only consider photos in this album")
+@async_command
 async def create_pano_albums(
     api_key: str,
     base_url: str,
+    dry_run: bool,
     time_after: str | None,
     time_before: str | None,
     album: str | None,
-    dry_run: bool,
 ):
     from immichpy import AsyncClient
     from immichpy.client.generated.models.metadata_search_dto import MetadataSearchDto
@@ -94,59 +167,22 @@ async def create_pano_albums(
             )
 
 
-async def delete_pano_albums(
-    api_key: str,
-    base_url: str,
-    dry_run: bool,
-    delete_assets: bool,
-):
-    from immichpy import AsyncClient
-    from immichpy.client.generated.models.asset_bulk_delete_dto import (
-        AssetBulkDeleteDto,
-    )
-
-    async with AsyncClient(
-        api_key=api_key,
-        base_url=base_url,
-    ) as client:
-        asset_ids = []
-
-        albums = await client.albums.get_all_albums()
-        for album in albums:
-            if album.album_name.startswith("pano-"):
-                if delete_assets:
-                    # get album with assets
-                    album = await client.albums.get_album_info(id=album.id)  # type: ignore
-                    for asset in album.assets:
-                        print("deleting asset", asset.original_file_name)
-                        asset_ids.append(asset.id)
-
-                print("deleting album", album.album_name)
-                if not dry_run:
-                    await client.albums.delete_album(id=album.id)  # type: ignore
-
-        if delete_assets and not dry_run:
-            delete_assets_dto = AssetBulkDeleteDto(ids=asset_ids)
-            await client.assets.delete_assets(delete_assets_dto)  # type: ignore
+###################################################################################################
 
 
-async def run_command(*args):
-    proc = await asyncio.create_subprocess_exec(
-        *args,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    returncode = await proc.wait()
-    if returncode != 0:
-        raise RuntimeError(f"Command {args} failed with return code {returncode}")
-
-
+@cli.command(help="create Hugin projects from pano albums")
+@API_KEY_OPTION
+@BASE_URL_OPTION
+@DRY_RUN_OPTION
+@THREADS_OPTION
+@PATH_OPTION
+@async_command
 async def create_hugin_projects(
     api_key: str,
     base_url: str,
-    path: pathlib.Path,
-    num_threads: int,
     dry_run: bool,
+    threads: int,
+    path: pathlib.Path,
 ):
     from immichpy import AsyncClient
 
@@ -211,7 +247,7 @@ async def create_hugin_projects(
                     pto,
                 )
 
-        workers = [asyncio.create_task(worker()) for i in range(num_threads)]
+        workers = [asyncio.create_task(worker()) for i in range(threads)]
 
         for album in albums:
             if album.album_name.startswith("pano-"):
@@ -239,11 +275,15 @@ async def create_hugin_projects(
         await asyncio.gather(*workers)
 
 
-async def run_hugin(
-    path: pathlib.Path,
-    num_threads: int,
-    dry_run: bool,
-):
+###################################################################################################
+
+
+@cli.command(help="run Hugin stitcher on created projects")
+@DRY_RUN_OPTION
+@THREADS_OPTION
+@PATH_OPTION
+@async_command
+async def run_hugin(dry_run: bool, threads: int, path: pathlib.Path):
     folder_queue: asyncio.Queue[pathlib.Path | None] = asyncio.Queue()
 
     async def worker():
@@ -270,7 +310,7 @@ async def run_hugin(
                 pto,
             )
 
-    workers = [asyncio.create_task(worker()) for i in range(num_threads)]
+    workers = [asyncio.create_task(worker()) for i in range(threads)]
 
     for folder in path.glob("pano-*"):
         if folder.is_dir():
@@ -282,11 +322,15 @@ async def run_hugin(
     await asyncio.gather(*workers)
 
 
-async def add_metadata(
-    path: pathlib.Path,
-    num_threads: int,
-    dry_run: bool,
-):
+###################################################################################################
+
+
+@cli.command(help="add metadata from original files to stitched panoramas")
+@DRY_RUN_OPTION
+@THREADS_OPTION
+@PATH_OPTION
+@async_command
+async def add_metadata(dry_run: bool, threads: int, path: pathlib.Path):
     folder_queue: asyncio.Queue[pathlib.Path | None] = asyncio.Queue()
 
     async def worker():
@@ -336,7 +380,7 @@ async def add_metadata(
                 jpg,
             )
 
-    workers = [asyncio.create_task(worker()) for i in range(num_threads)]
+    workers = [asyncio.create_task(worker()) for i in range(threads)]
 
     for folder in path.glob("pano-*"):
         if folder.is_dir():
@@ -348,157 +392,56 @@ async def add_metadata(
     await asyncio.gather(*workers)
 
 
-# async def upload_panoramas(
-#     api_key: str,
-#     base_url: str,
-#     path: pathlib.Path,
-#     dry_run: bool,
-# ):
-#     from immichpy import AsyncClient
+###################################################################################################
 
-#     async with AsyncClient(
-#         api_key=api_key,
-#         base_url=base_url,
-#     ) as client:
-#         for folder in path.glob("pano-*"):
-#             if not folder.is_dir():
-#                 continue
-#             jpg = folder / f"{folder.name}.jpg"
 
-#             client.assets.upload_asset()
+@cli.command(help="delete pano albums")
+@API_KEY_OPTION
+@BASE_URL_OPTION
+@DRY_RUN_OPTION
+@click.option(
+    "--delete-assets",
+    is_flag=True,
+    help="delete assets in pano albums instead of just albums",
+)
+@async_command
+async def delete_pano_albums(
+    api_key: str,
+    base_url: str,
+    dry_run: bool,
+    delete_assets: bool,
+):
+    from immichpy import AsyncClient
+    from immichpy.client.generated.models.asset_bulk_delete_dto import (
+        AssetBulkDeleteDto,
+    )
 
+    async with AsyncClient(
+        api_key=api_key,
+        base_url=base_url,
+    ) as client:
+        asset_ids = []
+
+        albums = await client.albums.get_all_albums()
+        for album in albums:
+            if album.album_name.startswith("pano-"):
+                if delete_assets:
+                    # get album with assets
+                    album = await client.albums.get_album_info(id=album.id)  # type: ignore
+                    for asset in album.assets:
+                        print("deleting asset", asset.original_file_name)
+                        asset_ids.append(asset.id)
+
+                print("deleting album", album.album_name)
+                if not dry_run:
+                    await client.albums.delete_album(id=album.id)  # type: ignore
+
+        if delete_assets and not dry_run:
+            delete_assets_dto = AssetBulkDeleteDto(ids=asset_ids)
+            await client.assets.delete_assets(delete_assets_dto)  # type: ignore
+
+
+###################################################################################################
 
 if __name__ == "__main__":
-
-    def environ_or_required(key):
-        return (
-            {"default": os.environ.get(key)}
-            if os.environ.get(key)
-            else {"required": True}
-        )
-
-    parser = argparse.ArgumentParser()
-
-    ###############################################################################################
-
-    parser.add_argument("--api-key", **environ_or_required("IMMICH_API_KEY"))  # type: ignore
-    parser.add_argument("--base-url", **environ_or_required("IMMICH_BASE_URL"))  # type: ignore
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="don't actually execute, just print what would be done",
-    )
-    parser.add_argument(
-        "--threads", type=int, default=4, help="number of threads to use for processing"
-    )
-
-    commands = parser.add_subparsers(dest="command", required=True)
-
-    ###############################################################################################
-
-    cmd_create = commands.add_parser(
-        "create-pano-albums",
-        help="group photos into albums if they belong to the same pano",
-    )
-    cmd_create.add_argument(
-        "--time-after", help="only consider photos created after this time"
-    )
-    cmd_create.add_argument(
-        "--time-before", help="only consider photos created before this time"
-    )
-    cmd_create.add_argument("--album", help="only consider photos in this album")
-
-    ###############################################################################################
-
-    cmd_delete = commands.add_parser(
-        "delete-pano-albums",
-        help="delete pano albums",
-    )
-    cmd_delete.add_argument(
-        "--delete-assets",
-        action="store_true",
-        help="delete assets in pano albums instead of just albums",
-    )
-
-    ###############################################################################################
-
-    cmd_create_hugin_projects = commands.add_parser(
-        "create-hugin-projects",
-        help="create Hugin projects from pano albums",
-    )
-    cmd_create_hugin_projects.add_argument(
-        "--path", help="path to save Hugin projects", default=os.getcwd()
-    )
-
-    ###############################################################################################
-
-    cmd_run_hugin = commands.add_parser(
-        "run-hugin",
-        help="run Hugin stitcher on created projects",
-    )
-    cmd_run_hugin.add_argument(
-        "--path", help="path where panorama folders are located", default=os.getcwd()
-    )
-
-    ###############################################################################################
-
-    cmd_add_metadata = commands.add_parser(
-        "add-metadata",
-        help="add metadata from original files to stitched panoramas",
-    )
-    cmd_add_metadata.add_argument(
-        "--path", help="path where panorama folders are located", default=os.getcwd()
-    )
-
-    ###############################################################################################
-
-    args = parser.parse_args()
-
-    if args.command == "create-pano-albums":
-        asyncio.run(
-            create_pano_albums(
-                api_key=args.api_key,
-                base_url=args.base_url,
-                time_after=args.time_after,
-                time_before=args.time_before,
-                album=args.album,
-                dry_run=args.dry_run,
-            )
-        )
-    elif args.command == "delete-pano-albums":
-        asyncio.run(
-            delete_pano_albums(
-                api_key=args.api_key,
-                base_url=args.base_url,
-                dry_run=args.dry_run,
-                delete_assets=args.delete_assets,
-            )
-        )
-    elif args.command == "create-hugin-projects":
-        asyncio.run(
-            create_hugin_projects(
-                api_key=args.api_key,
-                base_url=args.base_url,
-                path=pathlib.Path(args.path),
-                num_threads=args.threads,
-                dry_run=args.dry_run,
-            )
-        )
-    elif args.command == "run-hugin":
-        asyncio.run(
-            run_hugin(
-                path=pathlib.Path(args.path),
-                num_threads=args.threads,
-                dry_run=args.dry_run,
-            )
-        )
-    elif args.command == "add-metadata":
-        asyncio.run(
-            add_metadata(
-                path=pathlib.Path(args.path),
-                num_threads=args.threads,
-                dry_run=args.dry_run,
-            )
-        )
-    else:
-        raise ValueError("unknown command", args.command)
+    cli()
